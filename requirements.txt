@@ -1,3 +1,2 @@
 python-telegram-bot==20.5
-anthropic==1.1.0
-python-dateutil
+anthropic
