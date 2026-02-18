@@ -1,6 +1,21 @@
-import json
 import os
+import logging
+import json
+from datetime import datetime
+from dateutil import parser
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+import anthropic
 
+# ======== توکن‌ها ========
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+# ======== لاگ و کلاینت Claude ========
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# ======== فایل داده‌ها ========
 DATA_FILE = "data.json"
 
 def load_data():
@@ -11,52 +26,101 @@ def load_data():
 
 def save_data():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(user_data, f, ensure_ascii=False, indent=2)import os
-import logging
-from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-import anthropic
+        json.dump(user_data, f, ensure_ascii=False, indent=2)
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+user_data = load_data()
 
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-user_data = {}
-
+# ======== System prompt Claude ========
 SYSTEM_PROMPT = "تو یک دستیار هوشمند فارسی‌زبان هستی. همیشه به فارسی پاسخ بده. تاریخ امروز: " + datetime.now().strftime("%Y/%m/%d")
 
+# ======== مدیریت کاربران ========
 def get_user(user_id):
     if user_id not in user_data:
         user_data[user_id] = {"history": [], "tasks": []}
     return user_data[user_id]
 
+# ======== پرسش از Claude ========
 def ask_claude(user_id, message):
     user = get_user(user_id)
     user["history"].append({"role": "user", "content": message})
     if len(user["history"]) > 20:
         user["history"] = user["history"][-20:]
     try:
-        response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1024, system=SYSTEM_PROMPT, messages=user["history"])
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            messages=user["history"]
+        )
         reply = response.content[0].text
         user["history"].append({"role": "assistant", "content": reply})
+        save_data()
         return reply
     except Exception as e:
         return "خطا در ارتباط با هوش مصنوعی. دوباره امتحان کنید."
 
+# ======== تابع یادآوری ========
+async def send_reminder(context):
+    task = context.job.data
+    await context.bot.send_message(
+        chat_id=context.job.chat_id,
+        text=f"⏰ یادآوری!\n\n{task['text']}"
+    )
+
+# ======== دستورات ربات ========
 async def start(update, context):
-    keyboard = [[InlineKeyboardButton("📋 تسک‌ها", callback_data="show_tasks"), InlineKeyboardButton("🗑 پاک کردن", callback_data="clear_history")]]
-    await update.message.reply_text("سلام! من دستیار هوشمند شما هستم.\n\n/task [متن] - تسک جدید\n/tasks - لیست تسک‌ها\n/done [شماره] - انجام شد\n/clear - پاک کردن تاریخچه", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [
+        [
+            InlineKeyboardButton("📋 تسک‌ها", callback_data="show_tasks"),
+            InlineKeyboardButton("🗑 پاک کردن", callback_data="clear_history")
+        ]
+    ]
+    await update.message.reply_text(
+        "سلام! من دستیار هوشمند شما هستم.\n\n"
+        "/task [متن] - تسک جدید\n"
+        "/tasks - لیست تسک‌ها\n"
+        "/done [شماره] - انجام شد\n"
+        "/clear - پاک کردن تاریخچه",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def add_task(update, context):
     user = get_user(update.effective_user.id)
     text = " ".join(context.args)
     if not text:
-        await update.message.reply_text("مثال: /task خرید نان")
+        await update.message.reply_text("مثال:\n/task فردا ساعت 5 باشگاه")
         return
-    user["tasks"].append({"id": len(user["tasks"]) + 1, "text": text, "done": False})
-    await update.message.reply_text(f"✅ تسک اضافه شد: {text}")
+
+    # استخراج زمان
+    reminder_time = None
+    try:
+        reminder_time = parser.parse(text, fuzzy=True)
+    except:
+        pass
+
+    task = {
+        "id": len(user["tasks"]) + 1,
+        "text": text,
+        "done": False,
+        "reminder": str(reminder_time) if reminder_time else None
+    }
+
+    user["tasks"].append(task)
+    save_data()
+
+    if reminder_time and reminder_time > datetime.now():
+        delay = (reminder_time - datetime.now()).total_seconds()
+        context.job_queue.run_once(
+            send_reminder,
+            delay,
+            chat_id=update.effective_chat.id,
+            data=task
+        )
+        await update.message.reply_text(
+            f"⏰ تسک زمان‌دار ثبت شد!\nیادآوری در: {reminder_time.strftime('%Y-%m-%d %H:%M')}"
+        )
+    else:
+        await update.message.reply_text(f"✅ تسک اضافه شد: {text}")
 
 async def show_tasks(update, context):
     user = get_user(update.effective_user.id)
@@ -77,11 +141,13 @@ async def done_task(update, context):
     for t in user["tasks"]:
         if t["id"] == task_id:
             t["done"] = True
+            save_data()
             await update.message.reply_text(f"✅ انجام شد: {t['text']}")
             return
 
 async def clear_history(update, context):
     get_user(update.effective_user.id)["history"] = []
+    save_data()
     await update.message.reply_text("تاریخچه پاک شد!")
 
 async def handle_message(update, context):
@@ -103,8 +169,10 @@ async def button_callback(update, context):
             await query.message.reply_text(msg)
     elif query.data == "clear_history":
         get_user(query.from_user.id)["history"] = []
+        save_data()
         await query.message.reply_text("تاریخچه پاک شد!")
 
+# ======== اجرای ربات ========
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
