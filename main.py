@@ -2,18 +2,14 @@ import os
 import logging
 import json
 from datetime import datetime
-from dateutil import parser
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-import anthropic
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 # ======== توکن‌ها ========
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-# ======== لاگ و کلاینت Claude ========
+# ======== لاگ ========
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # ======== فایل داده‌ها ========
 DATA_FILE = "data.json"
@@ -30,42 +26,11 @@ def save_data():
 
 user_data = load_data()
 
-# ======== System prompt Claude ========
-SYSTEM_PROMPT = "تو یک دستیار هوشمند فارسی‌زبان هستی. همیشه به فارسی پاسخ بده. تاریخ امروز: " + datetime.now().strftime("%Y/%m/%d")
-
 # ======== مدیریت کاربران ========
 def get_user(user_id):
     if user_id not in user_data:
         user_data[user_id] = {"history": [], "tasks": []}
     return user_data[user_id]
-
-# ======== پرسش از Claude ========
-def ask_claude(user_id, message):
-    user = get_user(user_id)
-    user["history"].append({"role": "user", "content": message})
-    if len(user["history"]) > 20:
-        user["history"] = user["history"][-20:]
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            messages=user["history"]
-        )
-        reply = response.content[0].text
-        user["history"].append({"role": "assistant", "content": reply})
-        save_data()
-        return reply
-    except Exception as e:
-        return "خطا در ارتباط با هوش مصنوعی. دوباره امتحان کنید."
-
-# ======== تابع یادآوری ========
-async def send_reminder(context):
-    task = context.job.data
-    await context.bot.send_message(
-        chat_id=context.job.chat_id,
-        text=f"⏰ یادآوری!\n\n{task['text']}"
-    )
 
 # ======== دستورات ربات ========
 async def start(update, context):
@@ -88,39 +53,17 @@ async def add_task(update, context):
     user = get_user(update.effective_user.id)
     text = " ".join(context.args)
     if not text:
-        await update.message.reply_text("مثال:\n/task فردا ساعت 5 باشگاه")
+        await update.message.reply_text("مثال:\n/task خرید نان")
         return
-
-    # استخراج زمان
-    reminder_time = None
-    try:
-        reminder_time = parser.parse(text, fuzzy=True)
-    except:
-        pass
 
     task = {
         "id": len(user["tasks"]) + 1,
         "text": text,
-        "done": False,
-        "reminder": str(reminder_time) if reminder_time else None
+        "done": False
     }
-
     user["tasks"].append(task)
     save_data()
-
-    if reminder_time and reminder_time > datetime.now():
-        delay = (reminder_time - datetime.now()).total_seconds()
-        context.job_queue.run_once(
-            send_reminder,
-            delay,
-            chat_id=update.effective_chat.id,
-            data=task
-        )
-        await update.message.reply_text(
-            f"⏰ تسک زمان‌دار ثبت شد!\nیادآوری در: {reminder_time.strftime('%Y-%m-%d %H:%M')}"
-        )
-    else:
-        await update.message.reply_text(f"✅ تسک اضافه شد: {text}")
+    await update.message.reply_text(f"✅ تسک اضافه شد: {text}")
 
 async def show_tasks(update, context):
     user = get_user(update.effective_user.id)
@@ -151,9 +94,11 @@ async def clear_history(update, context):
     await update.message.reply_text("تاریخچه پاک شد!")
 
 async def handle_message(update, context):
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    reply = ask_claude(update.effective_user.id, update.message.text)
-    await update.message.reply_text(reply)
+    # فقط متن کاربر رو ذخیره می‌کنیم، بدون AI
+    user = get_user(update.effective_user.id)
+    user["history"].append(update.message.text)
+    save_data()
+    await update.message.reply_text("پیام ثبت شد ✅")
 
 async def button_callback(update, context):
     query = update.callback_query
